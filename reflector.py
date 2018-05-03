@@ -146,12 +146,41 @@ class Reflector:
         return tokSet
 
 
-    def step(self, index='tmdb'):
+    def addStepDocs(self, resp):
+        for doc in resp['hits']['hits']:
+            rf = Reflector(es=self.es, doc=doc['_source'], stepNo=self.stepNo-1)
+            print("%s" % doc['_source']['title'])
+            addOtherQueryCandidates(self.overviewQueryCandidates, rf.overviewQueryCandidates)
+
+
+    def stepCollection(self, index='tmdb'):
         if self.stepNo == 0:
             return {}
-        topN = ["\"%s\"^%s" % (np, qc.score())
-                 for (np, qc) in self.overviewQueryCandidates.items()]
+        print("Collection %s" % self.doc['belongs_to_collection']['id'])
+        collId = self.doc['belongs_to_collection']['id']
+        allQ = {
+            "size": 10,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"match": {
+                            "belongs_to_collection.id": collId}}
+                    ],
+                    "must_not": [
+                        {"match": {"_id": self.doc['id']}}
+                    ]
+                }
+            }
+        }
+        resp = es.search(index=index, body=allQ)
+        self.addStepDocs(resp)
 
+
+
+    def stepTitleMatch(self, index='tmdb'):
+        """ Step into movies with 100% mm title match"""
+        if self.stepNo == 0:
+            return {}
         allQ = {
             "size": 10,
             "query": {
@@ -163,9 +192,6 @@ class Reflector:
                                 "query": self.doc['title'],
                                 "boost": 10000.0}}},
                     ],
-                    "should": [
-                        {"query_string": {"query": " ".join(topN), "fields": ["text_all.en"]}}
-                    ],
                     "must_not": [
                         {"match": {"_id": self.doc['id']}}
                     ]
@@ -173,10 +199,7 @@ class Reflector:
             }
         }
         resp = es.search(index=index, body=allQ)
-        for doc in resp['hits']['hits']:
-            rf = Reflector(es=self.es, doc=doc['_source'], stepNo=self.stepNo-1)
-            print("%s" % doc['_source']['title'])
-            addOtherQueryCandidates(self.overviewQueryCandidates, rf.overviewQueryCandidates)
+        self.addStepDocs(resp)
 
     def __init__(self, doc, es, stepNo=1):
         self.doc = doc
@@ -216,7 +239,8 @@ class Reflector:
         print("Adding Prop Nouns %s" % propNouns)
         addNounPhrases(self.overviewQueryCandidates, nPhrases=propNouns, value=10.0,es=es)
 
-        self.step()
+        self.stepTitleMatch()
+        self.stepCollection()
 
     def queries(self):
         # Exact title phrase
@@ -248,7 +272,7 @@ if __name__ == "__main__":
         print(doc['overview'])
         rfor = Reflector(doc, es=es)
         for queryScore in rfor.queries():
-            if queryScore[1] > 1:
+            if queryScore[1] > 1000:
                 print(" --- %s %s (%s) " % queryScore)
 
 
