@@ -31,8 +31,9 @@ def phraseDocFreq(text, es):
 
 # Assemble all noun phrases into queryCandidates
 class QueryCandidate:
-    def __init__(self, es, value, queryPhrase, minDocFreq=3):
+    def __init__(self, es, value, queryPhrase, natural, minDocFreq=3):
         self.value = value
+        self.natural = natural
         self.phraseDf = phraseDocFreq(queryPhrase, es=es)
         self.phraseIdf = 0
         if self.phraseDf >= minDocFreq:
@@ -49,17 +50,17 @@ class QueryCandidate:
         return self.value * self.phraseFreq * self.phraseIdf # sqrt(self.phraseFreq) * self.phraseIdf * self.value
 
     def __str__(self):
-        return "val:%s - pf:%s df:%s idf:%s" % (self.value,
-                self.phraseFreq, self.phraseDf, self.phraseIdf)
+        return "val:%s - pf:%s df:%s idf:%s nat:%s" % (self.value,
+                self.phraseFreq, self.phraseDf, self.phraseIdf, self.natural)
 
 
-def addNounPhrases(queryCandidates, nPhrases, es, value=1.0):
+def addNounPhrases(queryCandidates, nPhrases, es, value=1.0, natural=True):
     for np in nPhrases:
         lowerNp = np.lower()
         if lowerNp in queryCandidates:
             queryCandidates[lowerNp].addOccurence(value=value)
         else:
-            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value, queryPhrase=lowerNp)
+            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value, queryPhrase=lowerNp, natural=natural)
     return queryCandidates
 
 def addOtherQueryCandidates(queryCandidates, otherQCandidates):
@@ -68,6 +69,9 @@ def addOtherQueryCandidates(queryCandidates, otherQCandidates):
         if lowerNp in queryCandidates:
             queryCandidates[lowerNp].addOccurence(times=qc.phraseFreq)
         else:
+            from copy import copy
+            qc = copy(qc)
+            qc.natural = False
             queryCandidates[lowerNp] = qc
     return queryCandidates
 
@@ -150,7 +154,7 @@ class Reflector:
         for doc in resp['hits']['hits']:
             rf = Reflector(es=self.es, doc=doc['_source'], stepNo=self.stepNo-1)
             print("%s" % doc['_source']['title'])
-            addOtherQueryCandidates(self.overviewQueryCandidates, rf.overviewQueryCandidates)
+            addOtherQueryCandidates(self.textQueryCandidates, rf.textQueryCandidates)
 
 
     def stepCollection(self, index='tmdb'):
@@ -205,9 +209,9 @@ class Reflector:
         self.doc = doc
         self.es = es
         self.stepNo = stepNo
-        self.overviewQueryCandidates = {}
+        self.textQueryCandidates = {}
         # self.termHist = self.getTermHist(es)
-        self.overviewTerms = self.overviewPhrases = []
+        self.textTerms = self.textPhrases = []
         if 'overview' not in doc or doc['overview'] is None:
             return
         self.overviewTerms = self._bagOfWords(self.doc['overview'])
@@ -225,27 +229,38 @@ class Reflector:
         #print("===============")
         import spacy
         nlp = spacy.load('en')
-        overview = nlp(self.doc['overview'])
+        importantText = self.doc['title'] + '\n' + self.doc['overview']
 
-        nPhrases = [str(np) for np in overview.noun_chunks]
+        if 'genres' in self.doc:
+            importantText += "\n".join([genre['name'] for genre in self.doc['genres']])
+
+        if 'cast' in self.doc:
+            importantText += "\n".join([cast['name'] for cast in self.doc['cast'][:10] ])
+            importantText += "\n".join([cast['character'] for cast in self.doc['cast'][:10] ])
+
+        impTextNlp = nlp(importantText)
+
+        nPhrases = [str(np) for np in impTextNlp.noun_chunks]
 
         # Pull out contiguous proper nouns from chunks, add to list
         nouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='NOUN')
         propNouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='PROPN')
 
-        addNounPhrases(self.overviewQueryCandidates, nPhrases, value=0.5,es=es)
+        # Always consider the title a proper noun
+        propNouns.add(self.doc['title'])
+
+        addNounPhrases(self.textQueryCandidates, nPhrases, value=0.5,es=es)
         print("Adding Bare Nouns %s" % nouns)
-        addNounPhrases(self.overviewQueryCandidates, nPhrases=nouns, value=2.5,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=nouns, value=2.5,es=es)
         print("Adding Prop Nouns %s" % propNouns)
-        addNounPhrases(self.overviewQueryCandidates, nPhrases=propNouns, value=10.0,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=propNouns, value=10.0,es=es)
 
         self.stepTitleMatch()
         self.stepCollection()
 
     def queries(self):
         # Exact title phrase
-        allQs = [(np, qc.score(), "overview-value:%s" % qc) for (np, qc) in self.overviewQueryCandidates.items()]
-        allQs.extend([(self.doc['title'], 10000, 'title')])
+        allQs = [(np, qc.score(), "text-value:%s" % qc) for (np, qc) in self.textQueryCandidates.items()]
         allQs.sort(key = lambda npScored: npScored[1])
         return allQs
 
@@ -273,6 +288,9 @@ if __name__ == "__main__":
         rfor = Reflector(doc, es=es)
         for queryScore in rfor.queries():
             if queryScore[1] > 1000:
+                print(" --- %s %s (%s) " % queryScore)
+        for queryScore in rfor.queries():
+            if queryScore[1] > 100 and queryScore[1] <= 1000:
                 print(" --- %s %s (%s) " % queryScore)
 
 
