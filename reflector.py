@@ -1,5 +1,14 @@
 import string
+import logging
 from elasticsearch import Elasticsearch
+import spacy
+
+# Enable logging for this module
+logger = logging.getLogger('reflector')
+logger.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+logger.addHandler(ch)
 
 def phraseFreq(phrase, es, index='tmdb'):
     if phrase == 'it' or phrase == 'they':
@@ -18,21 +27,28 @@ def phraseFreq(phrase, es, index='tmdb'):
 
 
 def phraseDocFreq(text, es):
-    pf = phraseFreq(phrase=text, es=es)
-    #bow = self._bagOfWords(text)
-    #minDf = 10000000
-    #for w in bow:
-    #    if w not in self.termHist:
-    #        return 1000
-    #    if self.termHist[w] < minDf:
-    #        minDf = self.termHist[w]
-    return pf
+    lookupText = text.lower()
+    if lookupText not in phraseDocFreq.cache:
+        pf = phraseFreq(phrase=text, es=es)
+        #bow = self._bagOfWords(text)
+        #minDf = 10000000
+        #for w in bow:
+        #    if w not in self.termHist:
+        #        return 1000
+        #    if self.termHist[w] < minDf:
+        #        minDf = self.termHist[w]
+        phraseDocFreq.cache[lookupText] = pf
+        return pf
+    else:
+        return phraseDocFreq.cache[lookupText]
+phraseDocFreq.cache={}
 
 
 # Assemble all noun phrases into queryCandidates
 class QueryCandidate:
-    def __init__(self, es, value, queryPhrase, natural, minDocFreq=3):
+    def __init__(self, es, value, queryPhrase, docId, natural, minDocFreq=3):
         self.value = value
+        self.docId = docId
         self.natural = natural
         self.phraseDf = phraseDocFreq(queryPhrase, es=es)
         self.phraseIdf = 0
@@ -50,17 +66,17 @@ class QueryCandidate:
         return self.value * self.phraseFreq * self.phraseIdf # sqrt(self.phraseFreq) * self.phraseIdf * self.value
 
     def __str__(self):
-        return "val:%s - pf:%s df:%s idf:%s nat:%s" % (self.value,
-                self.phraseFreq, self.phraseDf, self.phraseIdf, self.natural)
+        return "val:%s - pf:%s df:%s idf:%s docId:%s nat:%s" % (self.value,
+                self.phraseFreq, self.phraseDf, self.phraseIdf, self.docId, self.natural)
 
 
-def addNounPhrases(queryCandidates, nPhrases, es, value=1.0, natural=True):
+def addNounPhrases(queryCandidates, nPhrases, es, fromDocId, value=1.0, natural=True):
     for np in nPhrases:
         lowerNp = np.lower()
         if lowerNp in queryCandidates:
             queryCandidates[lowerNp].addOccurence(value=value)
         else:
-            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value, queryPhrase=lowerNp, natural=natural)
+            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value, docId=fromDocId, queryPhrase=lowerNp, natural=natural)
     return queryCandidates
 
 def addOtherQueryCandidates(queryCandidates, otherQCandidates):
@@ -90,30 +106,6 @@ class Reflector:
         clearly this is not as good as implicit or expert judgments
 
         """
-
-
-    def getTermHist(self, es, index='tmdb'):
-        termsQ = {
-            "size": 0,
-            "query": {
-                "match_all": {}
-            },
-            "aggs": {
-               "all_terms": {
-                   "terms": {
-                      "field": "text_all"
-                      , "size": "40000"
-                   }
-               }
-            }
-        }
-        resp = es.search(index=index, body=termsQ)
-        terms =  resp['aggregations']['all_terms']['buckets']
-        termDict = {}
-        for term in terms:
-            termDict[term['key']] = term['doc_count']
-
-        return termDict
 
 
     def _bagOfWords(self, text):
@@ -152,18 +144,24 @@ class Reflector:
 
     def addStepDocs(self, resp):
         for doc in resp['hits']['hits']:
-            rf = Reflector(es=self.es, doc=doc['_source'], stepNo=self.stepNo-1)
-            print("%s" % doc['_source']['title'])
-            addOtherQueryCandidates(self.textQueryCandidates, rf.textQueryCandidates)
+            # Dont double add docs through various similarity methods
+            if doc['_id'] not in self.stepDocs:
+                self.stepDocs.add(doc['_id'])
+                rf = Reflector(es=self.es, docId=self.docId, doc=doc['_source'], stepNo=self.stepNo-1)
+                logger.info("Stepped To %s" % doc['_source']['title'])
+                addOtherQueryCandidates(self.textQueryCandidates, rf.textQueryCandidates)
 
 
     def stepCollection(self, index='tmdb'):
+        if 'belongs_to_collection' not in self.doc or self.doc['belongs_to_collection'] is None:
+            logger.info("Not Part of Collection %s" % self.doc['title'])
+            return False
         if self.stepNo == 0:
-            return {}
-        print("Collection %s" % self.doc['belongs_to_collection']['id'])
+            return False
+        logger.debug("Step Into Collection %s" % self.doc['belongs_to_collection']['id'])
         collId = self.doc['belongs_to_collection']['id']
         allQ = {
-            "size": 10,
+            "size": 50,
             "query": {
                 "bool": {
                     "must": [
@@ -176,13 +174,15 @@ class Reflector:
                 }
             }
         }
-        resp = es.search(index=index, body=allQ)
+
+        resp = self.es.search(index=index, body=allQ)
         self.addStepDocs(resp)
 
 
 
     def stepTitleMatch(self, index='tmdb'):
         """ Step into movies with 100% mm title match"""
+        logger.debug("Step Into Full Title Match For %s" % self.doc['title'])
         if self.stepNo == 0:
             return {}
         allQ = {
@@ -202,32 +202,21 @@ class Reflector:
                 }
             }
         }
-        resp = es.search(index=index, body=allQ)
+        resp = self.es.search(index=index, body=allQ)
         self.addStepDocs(resp)
 
-    def __init__(self, doc, es, stepNo=1):
+    def __init__(self, doc, es, docId, index='tmdb', stepNo=1):
+        logger.info("Phrase Cache Size %s" % len(phraseDocFreq.cache))
+        self.stepDocs = set()
         self.doc = doc
+        self.docId = docId
         self.es = es
         self.stepNo = stepNo
         self.textQueryCandidates = {}
-        # self.termHist = self.getTermHist(es)
         self.textTerms = self.textPhrases = []
         if 'overview' not in doc or doc['overview'] is None:
             return
-        self.overviewTerms = self._bagOfWords(self.doc['overview'])
-        # self.overviewTerms.sort(key=lambda term: self.termHist[term] if term in self.termHist else -1)
-        # Map each overview term to a doc freq
 
-        #print("Terms")
-        #for term in self.overviewTerms:
-        #    if term in self.termHist:
-        #        print ("term %s -> %s" % (term, self.termHist[term]) )
-        #    else:
-        #        print ("term %s -> %s" % (term, -1) )
-
-        #print("Noun Phrases (overview)")
-        #print("===============")
-        import spacy
         nlp = spacy.load('en')
         importantText = self.doc['title'] + '\n' + self.doc['overview']
 
@@ -249,14 +238,14 @@ class Reflector:
         # Always consider the title a proper noun
         propNouns.add(self.doc['title'])
 
-        addNounPhrases(self.textQueryCandidates, nPhrases, value=0.5,es=es)
-        print("Adding Bare Nouns %s" % nouns)
-        addNounPhrases(self.textQueryCandidates, nPhrases=nouns, value=2.5,es=es)
-        print("Adding Prop Nouns %s" % propNouns)
-        addNounPhrases(self.textQueryCandidates, nPhrases=propNouns, value=10.0,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases, fromDocId=self.docId, value=0.5,es=es)
+        logger.debug("Adding Bare Nouns %s" % nouns)
+        addNounPhrases(self.textQueryCandidates, nPhrases=nouns, fromDocId=self.docId, value=2.5,es=es)
+        logger.debug("Adding Prop Nouns %s" % propNouns)
+        addNounPhrases(self.textQueryCandidates, nPhrases=propNouns, fromDocId=self.docId, value=10.0,es=es)
 
-        self.stepTitleMatch()
         self.stepCollection()
+        self.stepTitleMatch()
 
     def queries(self):
         # Exact title phrase
@@ -285,13 +274,9 @@ if __name__ == "__main__":
     for doc in docs(titleSearch=argv[1], es=es):
         print(doc['title'])
         print(doc['overview'])
-        rfor = Reflector(doc, es=es)
+        rfor = Reflector(doc, docId=doc['id'], es=es)
         for queryScore in rfor.queries():
-            if queryScore[1] > 1000:
+            if queryScore[1] > 10:
                 print(" --- %s %s (%s) " % queryScore)
-        for queryScore in rfor.queries():
-            if queryScore[1] > 100 and queryScore[1] <= 1000:
-                print(" --- %s %s (%s) " % queryScore)
-
 
 
