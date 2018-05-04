@@ -2,6 +2,7 @@ from reflector import Reflector
 from elasticsearch.helpers import scan
 from elasticsearch import Elasticsearch
 from itertools import islice
+from judgments import Judgment, judgmentsToFile
 
 def seriesMovie(movie):
     return 'title' in movie and 'overview' in movie and 'belongs_to_collection' in movie and movie['belongs_to_collection'] is not None
@@ -10,7 +11,7 @@ def reflectSeries(es, index='tmdb', doc_type='movie'):
     """ Series provide the best reflections, so we'll limit our scope
         to those. After all this is training data!"""
     reflections = {}
-    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),5000):
+    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),500):
         movie = hit['_source']
         docId = hit['_id']
         # Movies part of a series generate the best training data
@@ -46,8 +47,29 @@ def insertNegativeJudgments(reflections):
     # Apply each qc to every other qc, add as a negative judgment if not mentioned
     for title, ref in reflections.items():
         for np in allNp:
-            print("ADD NEG JUDG %s" % np)
             ref.addNegativeJudgment(np)
+
+
+def qcToJudg(qc, qid):
+    return Judgment(grade=qc.asJudgment(),
+                    qid=qid,
+                    keywords=qc.qp,
+                    docId=qc.docId,
+                    )
+
+
+
+def toJudgList(inverted, minTopGrade=3, minLen=10):
+    judgList = []
+    qid=0
+    for phrase, qcs in inverted.items():
+        if len(qcs) >= minLen and qcs[0].asJudgment() >= minTopGrade:
+            for qc in qcs:
+                judg = qcToJudg(qc, qid=qid)
+                judgList.append(judg)
+            qid += 1
+    return judgList, (qid+1)
+
 
 
 if __name__ == "__main__":
@@ -55,9 +77,7 @@ if __name__ == "__main__":
     reflections = reflectSeries(es)
     insertNegativeJudgments(reflections=reflections)
     inverted = invertReflections(reflections)
-    for phrase, qcs in inverted.items():
-        if len(qcs) > 2 and qcs[0].asJudgment() >= 3:
-            print(" -- %s -- " % phrase)
-            for qc in qcs:
-                print(qc)
+    judgList, numQueries = toJudgList(inverted)
+    print("Got %s Good Judgments" % numQueries)
+    judgmentsToFile(filename='synth_judg.txt', judgmentsList=judgList)
 

@@ -87,7 +87,7 @@ def judgmentsToFile(filename, judgmentsList):
     with open(filename, 'w+') as f:
         f.write(fileHeader)
         for judg in judgByQid:
-            f.write(judg.toRanklibFormat() + '\n')
+            f.write(judg.toLibSvm() + '\n')
 
 
 
