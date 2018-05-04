@@ -6,6 +6,8 @@ import atexit
 import json
 import os.path
 
+nlp = spacy.load('en')
+
 # Enable logging for this module
 logger = logging.getLogger('reflector')
 logger.setLevel(logging.DEBUG)
@@ -50,10 +52,48 @@ if os.path.exists('df_cache.json'):
         phraseDocFreq.cache = json.load(f)
 
 
+def collectionLookup(es, collId, docId, index='tmdb'):
+    if collId not in collectionLookup.cache:
+        collQ = {
+            "size": 50,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"match": {
+                            "belongs_to_collection.id": collId}}
+                    ]
+                }
+            }
+        }
+
+        resp = es.search(index=index, body=collQ)
+        collectionLookup.cache[collId] = resp
+    else:
+        resp = collectionLookup[collId]
+    print("Collection Cache Size %s" % len(collectionLookup.cache))
+
+
+    delIdx = False
+    for idx, hit in enumerate(resp['hits']['hits']):
+        if hit['_id'] == docId:
+            delIdx = idx
+    del resp['hits']['hits'][delIdx]
+    return resp
+
+collectionLookup.cache = {}
+if os.path.exists('coll_cache.json'):
+    with open('coll_cache.json') as f:
+        collectionLookup.cache = json.load(f)
+
+
 @atexit.register
 def dumpCache():
+    with open('coll_cache.json', 'w') as f:
+        print('writing coll cache')
+        json.dump(collectionLookup.cache, f)
+
     with open('df_cache.json', 'w') as f:
-        print('writing cache')
+        print('writing pf cache')
         json.dump(phraseDocFreq.cache, f)
 
 # Assemble all noun phrases into queryCandidates
@@ -192,22 +232,7 @@ class Reflector:
             return False
         logger.debug("Step Into Collection %s" % self.doc['belongs_to_collection']['id'])
         collId = self.doc['belongs_to_collection']['id']
-        allQ = {
-            "size": 50,
-            "query": {
-                "bool": {
-                    "must": [
-                        {"match": {
-                            "belongs_to_collection.id": collId}}
-                    ],
-                    "must_not": [
-                        {"match": {"_id": self.doc['id']}}
-                    ]
-                }
-            }
-        }
-
-        resp = self.es.search(index=index, body=allQ)
+        resp = collectionLookup(es=self.es, collId=collId, docId=self.doc['id'])
         self.addStepDocs(resp)
 
 
@@ -260,7 +285,6 @@ class Reflector:
         if 'overview' not in doc or doc['overview'] is None:
             return
 
-        nlp = spacy.load('en')
         bodyText = self.doc['title'] + '. \n' + self.doc['overview'] + '\n'
 
         genrePhrases = castNamePhrases = charPhrases = []
