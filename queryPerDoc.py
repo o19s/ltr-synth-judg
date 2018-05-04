@@ -11,7 +11,7 @@ def reflectSeries(es, index='tmdb', doc_type='movie'):
     """ Series provide the best reflections, so we'll limit our scope
         to those. After all this is training data!"""
     reflections = {}
-    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),500):
+    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),1000):
         movie = hit['_source']
         docId = hit['_id']
         # Movies part of a series generate the best training data
@@ -28,7 +28,6 @@ def invertReflections(reflections):
     qcsByKeyword = {}
     for title, ref in reflections.items():
         for phrase, qc in ref.textQueryCandidates.items():
-            print("Adding %s" % qc)
             if phrase in qcsByKeyword:
                 qcsByKeyword[phrase].append(qc)
             else:
@@ -51,10 +50,15 @@ def insertNegativeJudgments(reflections):
 
 
 def qcToJudg(qc, qid):
+    weight = 1
+    # If a naturally occuring term in this doc, weight higher
+    if qc.natural:
+        weight=3
     return Judgment(grade=qc.asJudgment(),
                     qid=qid,
                     keywords=qc.qp,
                     docId=qc.docId,
+                    weight=weight
                     )
 
 
