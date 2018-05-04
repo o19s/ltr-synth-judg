@@ -148,7 +148,9 @@ def addNounPhrases(queryCandidates, nPhrases, es, fromDocId, fromDocTitle, value
         if lowerNp in queryCandidates:
             queryCandidates[lowerNp].addOccurence(value=value)
         else:
-            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value, docId=fromDocId, docTitle=fromDocTitle, queryPhrase=lowerNp, natural=natural)
+            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value,
+                                                      docId=fromDocId, docTitle=fromDocTitle,
+                                                      queryPhrase=lowerNp, natural=natural)
     return queryCandidates
 
 def addOtherQueryCandidates(queryCandidates, otherQCandidates):
@@ -304,26 +306,33 @@ class Reflector:
         propNouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='PROPN')
 
         # Always consider the title a proper noun
-        addNounPhrases(self.textQueryCandidates, nPhrases, fromDocTitle=docTitle, fromDocId=self.docId, value=0.5,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases,
+                       fromDocTitle=docTitle, fromDocId=self.docId, value=0.5,es=es)
         logger.debug("Adding Bare Nouns %s" % nouns)
-        addNounPhrases(self.textQueryCandidates, nPhrases=nouns, fromDocTitle=docTitle,fromDocId=self.docId, value=2.5,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=nouns,
+                       fromDocTitle=docTitle,fromDocId=self.docId, value=2.5,es=es)
         logger.debug("Adding Prop Nouns %s" % propNouns)
-        addNounPhrases(self.textQueryCandidates, nPhrases=propNouns,fromDocTitle=docTitle, fromDocId=self.docId, value=10.0,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=propNouns,
+                       fromDocTitle=docTitle, fromDocId=self.docId, value=10.0,es=es)
 
         logger.debug("Adding Genres %s" % genrePhrases)
-        addNounPhrases(self.textQueryCandidates, nPhrases=genrePhrases, fromDocTitle=docTitle,fromDocId=self.docId, value=5.0,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=genrePhrases,
+                       fromDocTitle=docTitle,fromDocId=self.docId, value=5.0,es=es)
 
         logger.debug("Adding Cast Names %s" % castNamePhrases)
-        addNounPhrases(self.textQueryCandidates, nPhrases=castNamePhrases, fromDocTitle=docTitle,fromDocId=self.docId, value=2.5,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=castNamePhrases,
+                       fromDocTitle=docTitle,fromDocId=self.docId, value=1.5,es=es)
 
         logger.debug("Adding Char Names %s" % charPhrases)
-        addNounPhrases(self.textQueryCandidates, nPhrases=charPhrases, fromDocTitle=docTitle,fromDocId=self.docId, value=2.5,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=charPhrases,
+                       fromDocTitle=docTitle,fromDocId=self.docId, value=1.5,es=es)
 
         logger.debug("Adding Title %s" % [self.doc['title']])
-        addNounPhrases(self.textQueryCandidates, nPhrases=[self.doc['title']], fromDocTitle=docTitle,fromDocId=self.docId, value=2.5,es=es)
+        addNounPhrases(self.textQueryCandidates, nPhrases=[self.doc['title']],
+                       fromDocTitle=docTitle,fromDocId=self.docId, value=10.0,es=es)
 
         self.stepCollection()
-        self.stepTitleMatch()
+        # self.stepTitleMatch()
 
     def queries(self):
         # Exact title phrase

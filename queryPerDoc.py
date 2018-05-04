@@ -11,7 +11,7 @@ def reflectSeries(es, index='tmdb', doc_type='movie'):
     """ Series provide the best reflections, so we'll limit our scope
         to those. After all this is training data!"""
     reflections = {}
-    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),1000):
+    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),10000):
         movie = hit['_source']
         docId = hit['_id']
         # Movies part of a series generate the best training data
