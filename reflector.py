@@ -69,7 +69,7 @@ def collectionLookup(es, collId, docId, index='tmdb'):
         resp = es.search(index=index, body=collQ)
         collectionLookup.cache[collId] = resp
     else:
-        resp = collectionLookup[collId]
+        resp = collectionLookup.cache[collId]
     print("Collection Cache Size %s" % len(collectionLookup.cache))
 
 
