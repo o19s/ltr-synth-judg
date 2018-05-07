@@ -11,7 +11,7 @@ def reflectSeries(es, index='tmdb', doc_type='movie'):
     """ Series provide the best reflections, so we'll limit our scope
         to those. After all this is training data!"""
     reflections = {}
-    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),10000):
+    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),5000):
         movie = hit['_source']
         docId = hit['_id']
         # Movies part of a series generate the best training data
@@ -27,7 +27,7 @@ def invertReflections(reflections):
         dictionary oriented"""
     qcsByKeyword = {}
     for title, ref in reflections.items():
-        for phrase, qc in ref.textQueryCandidates.items():
+        for phrase, qc in ref.queryCandidates.items():
             if phrase in qcsByKeyword:
                 qcsByKeyword[phrase].append(qc)
             else:
@@ -40,7 +40,7 @@ def invertReflections(reflections):
 def insertNegativeJudgments(reflections):
     allNp = set()
     for title, ref in reflections.items():
-        for phrase, qc in ref.textQueryCandidates.items():
+        for phrase, qc in ref.queryCandidates.items():
             allNp.add(qc.qp)
 
     # Apply each qc to every other qc, add as a negative judgment if not mentioned
@@ -52,8 +52,6 @@ def insertNegativeJudgments(reflections):
 def qcToJudg(qc, qid):
     weight = 1
     # If a naturally occuring term in this doc, weight higher
-    if qc.natural:
-        weight=3
     return Judgment(grade=qc.asJudgment(),
                     qid=qid,
                     keywords=qc.qp,
@@ -63,7 +61,7 @@ def qcToJudg(qc, qid):
 
 
 
-def toJudgList(inverted, minTopGrade=3, minLen=10):
+def toJudgList(inverted, minTopGrade=1, minLen=10):
     judgList = []
     qid=0
     for phrase, qcs in inverted.items():

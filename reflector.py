@@ -5,6 +5,15 @@ import spacy
 import atexit
 import json
 import os.path
+from enum import Enum
+
+class QueryClass(Enum):
+    EXACT_TITLE = 1
+    PARTIAL_TITLE = 2
+    BODY_PROPER_NOUNS = 10
+    BODY_NOUNS = 20
+    LINKED_BODY_TERMS = 50
+    UNRELATED_TERMS = 1000
 
 nlp = spacy.load('en')
 
@@ -12,7 +21,7 @@ nlp = spacy.load('en')
 logger = logging.getLogger('reflector')
 logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
+ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
 def phraseFreq(phrase, es, index='tmdb'):
@@ -98,60 +107,45 @@ def dumpCache():
 
 # Assemble all noun phrases into queryCandidates
 class QueryCandidate:
-    def __init__(self, es, value, queryPhrase, docId, docTitle, natural, minDocFreq=3):
-        self.value = value
+    def __init__(self, es, queryPhrase, docId, docTitle,
+                 queryClass, # A queryClass corresponds to a type of match, with lower
+                             # going to more important types of matches
+                 queryScore  # A queryScore is a priority-specific scoring system
+                             # for arbitrating within this class
+                 ):
         self.qp = queryPhrase
         self.docId = docId
         self.docTitle = docTitle
-        self.natural = natural
-        self.phraseDf = 0
-        if value > 0:
-            self.phraseDf = phraseDocFreq(queryPhrase, es=es)
-        self.phraseIdf = 0
-        if self.phraseDf >= minDocFreq:
-            self.phraseIdf = 1000.0 / (self.phraseDf + 1)
-        self.phraseFreq = 1
+        self.queryScore = queryScore
+        self.queryClass = queryClass
+        self.tf = self.tfidf = 0
 
-    def addOccurence(self, value=None, times=1):
+    def addOccurence(self, times=1):
         self.phraseFreq += times
-        if value:
-            self.value = value
+        #if updatedConfidence and updatedConfidence > self.confidence:
+        #    self.confidence = updatedConfidence
+        #if updatedWeight and updatedWeight > self.weight:
+        #    self.weight = updatedWeight
 
-    def score(self):
-        # from math import sqrt
-        return self.value * self.phraseFreq * self.phraseIdf # sqrt(self.phraseFreq) * self.phraseIdf * self.value
+    #def score(self):
+    #    # from math import sqrt
+    #    return self.confidence * self.phraseFreq * self.phraseIdf # sqrt(self.phraseFreq) * self.phraseIdf * self.value
+
+    def asWeight(self):
+        """ How important is it to get this one right? """
+        return self.weight
 
     def asJudgment(self):
-        score = self.score()
-        if score >= 500 and self.natural:
-            return 4
-        elif score >= 1500:
-            return 4
-        elif score > 100:
-            return 3
-        elif score > 0:
-            return 1
-        else:
-            return 0
+        """ How confident are we this is a good result
+            for this doc? """
+        return int(self.queryScore)
 
     def __repr__(self):
         return str(self)
 
     def __str__(self):
-        return "val:%s - pf:%s df:%s idf:%s docId:%s(%s) nat:%s judg:%s" % (self.value,
-                self.phraseFreq, self.phraseDf, self.phraseIdf, self.docId, self.docTitle, self.natural, self.asJudgment())
+        return "%s : class %s : score %s " % (self.qp, self.queryClass, self.queryScore)
 
-
-def addNounPhrases(queryCandidates, nPhrases, es, fromDocId, fromDocTitle, value=1.0, natural=True):
-    for np in nPhrases:
-        lowerNp = np.lower()
-        if lowerNp in queryCandidates:
-            queryCandidates[lowerNp].addOccurence(value=value)
-        else:
-            queryCandidates[lowerNp] = QueryCandidate(es=es, value=value,
-                                                      docId=fromDocId, docTitle=fromDocTitle,
-                                                      queryPhrase=lowerNp, natural=natural)
-    return queryCandidates
 
 def addOtherQueryCandidates(queryCandidates, otherQCandidates):
     for np, qc in otherQCandidates.items():
@@ -161,7 +155,7 @@ def addOtherQueryCandidates(queryCandidates, otherQCandidates):
         else:
             from copy import copy
             qc = copy(qc)
-            qc.natural = False
+            qc.weight /= 2
             queryCandidates[lowerNp] = qc
     return queryCandidates
 
@@ -216,14 +210,10 @@ class Reflector:
         return tokSet
 
 
-    def addStepDocs(self, resp):
+    def addStepDocs(self, stepColl, resp):
         for doc in resp['hits']['hits']:
-            # Dont double add docs through various similarity methods
-            if doc['_id'] not in self.stepDocs:
-                self.stepDocs.add(doc['_id'])
-                rf = Reflector(es=self.es, docTitle=self.docTitle, docId=self.docId, doc=doc['_source'], stepNo=self.stepNo-1)
-                logger.info("Stepped To %s" % doc['_source']['title'])
-                addOtherQueryCandidates(self.textQueryCandidates, rf.textQueryCandidates)
+            logger.debug("Step Doc %s" % doc['_source']['title'])
+            stepColl[doc['_id']] = doc['_source']
 
 
     def stepCollection(self, index='tmdb'):
@@ -235,11 +225,11 @@ class Reflector:
         logger.debug("Step Into Collection %s" % self.doc['belongs_to_collection']['id'])
         collId = self.doc['belongs_to_collection']['id']
         resp = collectionLookup(es=self.es, collId=collId, docId=self.doc['id'])
-        self.addStepDocs(resp)
+        self.addStepDocs(stepColl=self.collDocs, resp=resp)
 
 
 
-    def stepTitleMatch(self, index='tmdb'):
+    def stepExactTitleMatch(self, index='tmdb'):
         """ Step into movies with 100% mm title match"""
         logger.debug("Step Into Full Title Match For %s" % self.doc['title'])
         if self.stepNo == 0:
@@ -249,10 +239,9 @@ class Reflector:
             "query": {
                 "bool": {
                     "must": [
-                        {"match": {
-                            "title": {
-                                "minimum_should_match": "100%",
-                                "query": self.doc['title'],
+                        {"match_phrase": {
+                            "title_sent": {
+                                "query": "SENTINEL_BEGIN %s SENTINEL_END" % self.doc['title'],
                                 "boost": 10000.0}}},
                     ],
                     "must_not": [
@@ -262,81 +251,154 @@ class Reflector:
             }
         }
         resp = self.es.search(index=index, body=allQ)
-        self.addStepDocs(resp)
+        self.addStepDocs(stepColl=self.exactTitleDocs, resp=resp)
 
     def hasPhrase(self, np):
-        return np in self.textQueryCandidates
+        return np in self.queryCandidates
 
     def addNegativeJudgment(self, np):
         if not self.hasPhrase(np):
-            negQc = QueryCandidate(es=None,  value=0.0,
-                                   natural=False, queryPhrase=np,
+            negQc = QueryCandidate(es=None, queryClass=QueryClass.UNRELATED_TERMS,
+                                   queryScore=0.0,
+                                   queryPhrase=np,
                                    docId=self.docId, docTitle=self.docTitle)
-            self.textQueryCandidates[np] = negQc
+            self.queryCandidates[np] = negQc
 
     def __init__(self, doc, es, docTitle, docId, index='tmdb', stepNo=1):
         logger.info("Phrase Cache Size %s" % len(phraseDocFreq.cache))
-        self.stepDocs = set()
         self.doc = doc
         self.docTitle = docTitle
         self.docId = docId
         self.es = es
         self.stepNo = stepNo
-        self.textQueryCandidates = {}
+        self.queryCandidates = {}
         self.textTerms = self.textPhrases = []
-        if 'overview' not in doc or doc['overview'] is None:
-            return
 
-        bodyText = self.doc['title'] + '. \n' + self.doc['overview'] + '\n'
+        self.collDocs = {}
+        self.exactTitleDocs = {}
 
-        genrePhrases = castNamePhrases = charPhrases = []
-        if 'genres' in self.doc:
-            genrePhrases = [genre['name'] for genre in self.doc['genres']]
-
-        if 'cast' in self.doc:
-            castNamePhrases = [cast['name'] for cast in self.doc['cast'][:10] ]
-            charPhrases = [cast['character'] for cast in self.doc['cast'][:10] ]
-
-        bodyTextNlp = nlp(bodyText)
-
-        nPhrases = [str(np) for np in bodyTextNlp.noun_chunks]
-
-        # Pull out contiguous proper nouns from chunks, add to list
-        nouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='NOUN')
-        propNouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='PROPN')
-
-        # Always consider the title a proper noun
-        addNounPhrases(self.textQueryCandidates, nPhrases,
-                       fromDocTitle=docTitle, fromDocId=self.docId, value=0.5,es=es)
-        logger.debug("Adding Bare Nouns %s" % nouns)
-        addNounPhrases(self.textQueryCandidates, nPhrases=nouns,
-                       fromDocTitle=docTitle,fromDocId=self.docId, value=2.5,es=es)
-        logger.debug("Adding Prop Nouns %s" % propNouns)
-        addNounPhrases(self.textQueryCandidates, nPhrases=propNouns,
-                       fromDocTitle=docTitle, fromDocId=self.docId, value=10.0,es=es)
-
-        logger.debug("Adding Genres %s" % genrePhrases)
-        addNounPhrases(self.textQueryCandidates, nPhrases=genrePhrases,
-                       fromDocTitle=docTitle,fromDocId=self.docId, value=5.0,es=es)
-
-        logger.debug("Adding Cast Names %s" % castNamePhrases)
-        addNounPhrases(self.textQueryCandidates, nPhrases=castNamePhrases,
-                       fromDocTitle=docTitle,fromDocId=self.docId, value=1.5,es=es)
-
-        logger.debug("Adding Char Names %s" % charPhrases)
-        addNounPhrases(self.textQueryCandidates, nPhrases=charPhrases,
-                       fromDocTitle=docTitle,fromDocId=self.docId, value=1.5,es=es)
+        # Similar movies needed to make relative
+        # Scoring/value decisions
+        if stepNo > 0:
+            self.stepCollection()
+            self.stepExactTitleMatch()
 
         logger.debug("Adding Title %s" % [self.doc['title']])
-        addNounPhrases(self.textQueryCandidates, nPhrases=[self.doc['title']],
-                       fromDocTitle=docTitle,fromDocId=self.docId, value=10.0,es=es)
+        qc = QueryCandidate(es=es, queryClass=QueryClass.EXACT_TITLE, queryScore=20.0,
+                            docId=docId,
+                            docTitle=docTitle,
+                            queryPhrase=self.doc['title'])
+        self.queryCandidates[qc.qp] = qc
 
-        self.stepCollection()
-        # self.stepTitleMatch()
+        bodyText = self.doc['overview']
+        bodyTextNlp = nlp(bodyText)
+        nPhrases = [str(np) for np in bodyTextNlp.noun_chunks]
+        # nouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='NOUN')
+        propNouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='PROPN')
+
+        # Build reflectors for each step doc
+        collRefs = {}
+        collQcs = []
+        for stepDocId, stepDoc in self.collDocs.items():
+            collRefs[stepDocId] = Reflector(es=es, doc=stepDoc,
+                                            docTitle=stepDoc['title'],
+                                            docId=stepDoc['id'],
+                                            stepNo=stepNo-1)
+
+            collQcs.extend([refKeyValue[1] for refKeyValue in collRefs[stepDocId].queryCandidates.items()] )
+
+        for np in propNouns:
+            if qc not in self.queryCandidates:
+                qc = QueryCandidate(es=es, queryClass=QueryClass.BODY_PROPER_NOUNS, queryScore=1,
+                                    docId=docId,
+                                    docTitle=docTitle,
+                                    queryPhrase=np)
+                self.queryCandidates[qc.qp] = qc
+                qc.tf = 1
+            else:
+                qc = self.queryCandidates[np]
+                qc.tf += 1
+
+        # Add in linked doc proper nouns to amplify proper nouns here
+        for otherQc in collQcs:
+            if otherQc.qp in self.queryCandidates and otherQc.queryClass == QueryClass.BODY_PROPER_NOUNS:
+                print("Amplifying %s" % otherQc.qp)
+                self.queryCandidates[otherQc.qp].tf += (0.7 * otherQc.tf)
+
+
+        minDocFreq = 3
+        maxDocFreq = 100
+        for qp, qc in self.queryCandidates.items():
+            if qc.queryClass == QueryClass.BODY_PROPER_NOUNS:
+                docFreq = phraseDocFreq(es=es, text=qc.qp)
+                if docFreq >= minDocFreq and docFreq <= maxDocFreq:
+                    if qc.tf >= 2:
+                        qc.queryScore = 19
+                    else:
+                        qc.queryScore = 10
+                    qc.tfIdf = qc.tf * (1000 / docFreq)
+                else:
+                    qc.queryScore = 0
+
+        #if 'overview' not in doc or doc['overview'] is None:
+        #    return
+
+        #bodyText = self.doc['title'] + '. \n' + self.doc['overview'] + '\n'
+
+        #genrePhrases = castNamePhrases = charPhrases = []
+        #if 'genres' in self.doc:
+        #    genrePhrases = [genre['name'] for genre in self.doc['genres']]
+
+        #if 'cast' in self.doc:
+        #    castNamePhrases = [cast['name'] for cast in self.doc['cast'][:10] ]
+        #    charPhrases = [cast['character'] for cast in self.doc['cast'][:10] ]
+
+        #bodyTextNlp = nlp(bodyText)
+
+        #nPhrases = [str(np) for np in bodyTextNlp.noun_chunks]
+
+        # Pull out contiguous proper nouns from chunks, add to list
+        #nouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='NOUN')
+        #propNouns = self.contigPosTokSet(nPhrases=nPhrases, nlp=nlp, pos='PROPN')
+
+        # Arbitrary noun phrases
+        #addNounPhrases(self.queryCandidates, nPhrases,
+        #               fromDocTitle=docTitle, fromDocId=self.docId,
+        #               confidence=0.5, weight=1.0, es=es)
+
+        #logger.debug("Adding Bare Nouns %s" % nouns)
+        #addNounPhrases(self.queryCandidates, nPhrases=nouns,
+        #               fromDocTitle=docTitle,fromDocId=self.docId,
+        #               confidence=2.5, weight=1.0, es=es)
+        #logger.debug("Adding Prop Nouns %s" % propNouns)
+        #addNounPhrases(self.queryCandidates, nPhrases=propNouns,
+        #               fromDocTitle=docTitle, fromDocId=self.docId,
+        #               confidence=2.5, weight=2.0, es=es)
+
+        #logger.debug("Adding Genres %s" % genrePhrases)
+        #addNounPhrases(self.queryCandidates, nPhrases=genrePhrases,
+        #               fromDocTitle=docTitle,fromDocId=self.docId,
+        #               confidence=2.5, weight=2.0, es=es)
+
+        #logger.debug("Adding Cast Names %s" % castNamePhrases)
+        #addNounPhrases(self.queryCandidates, nPhrases=castNamePhrases,
+        #               fromDocTitle=docTitle,fromDocId=self.docId,
+        #               confidence=2.5, weight=2.0, es=es)
+
+        #logger.debug("Adding Char Names %s" % charPhrases)
+        #addNounPhrases(self.queryCandidates, nPhrases=charPhrases,
+        #               fromDocTitle=docTitle,fromDocId=self.docId,
+        #               confidence=1.5, weight=2.0, es=es)
+
+        #logger.debug("Adding Title %s" % [self.doc['title']])
+        #addNounPhrases(self.queryCandidates, nPhrases=[self.doc['title'].lower()],
+        #               fromDocTitle=docTitle,fromDocId=self.docId,
+        #               weight=7.0, confidence=10.0,es=es)
+
 
     def queries(self):
         # Exact title phrase
-        allQs = [(np, qc.score(), "text-value:%s" % qc) for (np, qc) in self.textQueryCandidates.items()]
+        allQs = [(np, qc.score(), "text-value:%s" % qc) for (np, qc) in self.queryCandidates.items()]
         allQs.sort(key = lambda npScored: npScored[1])
         return allQs
 
@@ -362,8 +424,6 @@ if __name__ == "__main__":
         print(doc['title'])
         print(doc['overview'])
         rfor = Reflector(doc, docTitle=doc['title'], docId=doc['id'], es=es)
-        for queryScore in rfor.queries():
-            if queryScore[1] > 10:
-                print(" --- %s %s (%s) " % queryScore)
-
+        for np, qc in rfor.queryCandidates.items():
+            print(qc)
 
