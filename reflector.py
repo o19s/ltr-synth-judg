@@ -10,6 +10,7 @@ from enum import Enum
 class QueryClass(Enum):
     EXACT_TITLE = 1
     PARTIAL_TITLE = 2
+    COLLECTION_TITLE = 5
     BODY_PROPER_NOUNS = 10
     BODY_NOUNS = 20
     LINKED_BODY_TERMS = 50
@@ -24,11 +25,14 @@ ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
-def phraseFreq(phrase, es, index='tmdb'):
+def phraseStats(phrase, es, index='tmdb'):
     if phrase == 'it' or phrase == 'they':
         return 100000
     termsQ = {
-        "size": 0,
+        "size": 5,
+        "sort": [
+            {"vote_count": "desc"}
+        ],
         "query": {
             "match_phrase": {
                 "text_all.en": phrase
@@ -36,25 +40,27 @@ def phraseFreq(phrase, es, index='tmdb'):
         }
     }
     resp = es.search(index=index, body=termsQ)
-    return resp['hits']['total']
+
+    phraseFreq = resp['hits']['total'];
+
+    topVoteCnt = 0
+    if len(resp['hits']['hits']) > 0:
+        srcDoc = resp['hits']['hits'][0]['_source']
+        if 'vote_count' in srcDoc:
+            topVoteCnt = srcDoc['vote_count']
+
+    return phraseFreq, topVoteCnt
 
 
 
 def phraseDocFreq(text, es):
     lookupText = text.lower()
-    if lookupText not in phraseDocFreq.cache:
-        pf = phraseFreq(phrase=text, es=es)
-        #bow = self._bagOfWords(text)
-        #minDf = 10000000
-        #for w in bow:
-        #    if w not in self.termHist:
-        #        return 1000
-        #    if self.termHist[w] < minDf:
-        #        minDf = self.termHist[w]
-        phraseDocFreq.cache[lookupText] = pf
-        return pf
+    if True: # lookupText not in phraseDocFreq.cache:
+        pf, voteCnt = phraseStats(phrase=text, es=es)
+        phraseDocFreq.cache[lookupText] = [pf, voteCnt]
+        return pf, voteCnt
     else:
-        return phraseDocFreq.cache[lookupText]
+        return phraseDocFreq.cache[lookupText][0], phraseDocFreq.cache[lookupText][1]
 phraseDocFreq.cache={}
 if os.path.exists('df_cache.json'):
     with open('df_cache.json') as f:
@@ -62,9 +68,13 @@ if os.path.exists('df_cache.json'):
 
 
 def collectionLookup(es, collId, docId, index='tmdb'):
+    topVoteCnt = 0
     if collId not in collectionLookup.cache:
         collQ = {
             "size": 50,
+            "sort": [
+                {"vote_count": "desc"}
+            ],
             "query": {
                 "bool": {
                     "must": [
@@ -81,13 +91,18 @@ def collectionLookup(es, collId, docId, index='tmdb'):
         resp = collectionLookup.cache[collId]
     print("Collection Cache Size %s" % len(collectionLookup.cache))
 
+    if len(resp['hits']['hits']) > 0:
+        srcDoc = resp['hits']['hits'][0]['_source']
+        if 'vote_count' in srcDoc:
+            topVoteCnt = srcDoc['vote_count']
+
 
     delIdx = False
     for idx, hit in enumerate(resp['hits']['hits']):
         if hit['_id'] == docId:
             delIdx = idx
     del resp['hits']['hits'][delIdx]
-    return resp
+    return resp, topVoteCnt
 
 collectionLookup.cache = {}
 if os.path.exists('coll_cache.json'):
@@ -224,8 +239,9 @@ class Reflector:
             return False
         logger.debug("Step Into Collection %s" % self.doc['belongs_to_collection']['id'])
         collId = self.doc['belongs_to_collection']['id']
-        resp = collectionLookup(es=self.es, collId=collId, docId=self.doc['id'])
+        resp, topVoteCnt = collectionLookup(es=self.es, collId=collId, docId=self.doc['id'])
         self.addStepDocs(stepColl=self.collDocs, resp=resp)
+        self.maxCollVoteCount = topVoteCnt
 
 
 
@@ -270,6 +286,7 @@ class Reflector:
         self.docTitle = docTitle
         self.docId = docId
         self.es = es
+        self.maxCollVoteCount = int(doc['vote_count']) if 'vote_count' in doc else 0
         self.stepNo = stepNo
         self.queryCandidates = {}
         self.textTerms = self.textPhrases = []
@@ -290,6 +307,7 @@ class Reflector:
                             queryPhrase=self.doc['title'])
         self.queryCandidates[qc.qp] = qc
 
+
         bodyText = self.doc['overview']
         bodyTextNlp = nlp(bodyText)
         nPhrases = [str(np) for np in bodyTextNlp.noun_chunks]
@@ -307,8 +325,28 @@ class Reflector:
 
             collQcs.extend([refKeyValue[1] for refKeyValue in collRefs[stepDocId].queryCandidates.items()] )
 
+        logger.debug("Adding Series Title %s" % [self.doc['title']])
+
+
+        # Add titles of sibling collections here
+        for stepDocId, stepDoc in self.collDocs.items():
+            if 'title' in stepDoc:
+                stepDocVoteCnt = stepDoc['vote_count'] if 'vote_count' in stepDoc else 0
+                stepDocTitle = stepDoc['title']
+                # Process movie titles in teh same collection
+                logger.debug("Adding Collection Sibling Title %s" % [self.doc['title']])
+                queryScore = 13 + int((stepDocVoteCnt / self.maxCollVoteCount) * 6)
+
+                qc = QueryCandidate(es=es, queryClass=QueryClass.COLLECTION_TITLE,
+                                    queryScore=queryScore,
+                                    docId=docId,
+                                    docTitle=docTitle,
+                                    queryPhrase=stepDocTitle)
+                self.queryCandidates[qc.qp] = qc
+
+        # Process proper nouns that occur here
         for np in propNouns:
-            if qc not in self.queryCandidates:
+            if np not in self.queryCandidates:
                 qc = QueryCandidate(es=es, queryClass=QueryClass.BODY_PROPER_NOUNS, queryScore=1,
                                     docId=docId,
                                     docTitle=docTitle,
@@ -323,17 +361,20 @@ class Reflector:
         for otherQc in collQcs:
             if otherQc.qp in self.queryCandidates and otherQc.queryClass == QueryClass.BODY_PROPER_NOUNS:
                 print("Amplifying %s" % otherQc.qp)
-                self.queryCandidates[otherQc.qp].tf += (0.7 * otherQc.tf)
+                self.queryCandidates[otherQc.qp].tf += (1.0 * otherQc.tf)
 
 
         minDocFreq = 3
         maxDocFreq = 100
         for qp, qc in self.queryCandidates.items():
             if qc.queryClass == QueryClass.BODY_PROPER_NOUNS:
-                docFreq = phraseDocFreq(es=es, text=qc.qp)
+                docFreq, topVoteCnt = phraseDocFreq(es=es, text=qc.qp)
                 if docFreq >= minDocFreq and docFreq <= maxDocFreq:
                     if qc.tf >= 2:
                         qc.queryScore = 19
+                        # Scale by this by popularity
+                        qc.queryScore = 13 + int(6 * (self.doc['vote_count'] / topVoteCnt))
+
                     else:
                         qc.queryScore = 10
                     qc.tfIdf = qc.tf * (1000 / docFreq)
