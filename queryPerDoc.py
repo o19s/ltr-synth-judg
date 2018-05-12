@@ -4,14 +4,24 @@ from elasticsearch import Elasticsearch
 from itertools import islice
 from judgments import Judgment, judgmentsToFile
 
+NUM_MOVIES_TO_SCAN=1000
+
+INCLUDE_NEGATIVE = 1.0
+if NUM_MOVIES_TO_SCAN > 5000:
+    INCLUDE_NEGATIVE = 0.5
+
 def seriesMovie(movie):
-    return 'title' in movie and 'overview' in movie and 'belongs_to_collection' in movie and movie['belongs_to_collection'] is not None
+    return 'title' in movie and \
+           'overview' in movie and \
+            isinstance(movie['overview'], str) and\
+            isinstance(movie['title'], str) and\
+           'belongs_to_collection' in movie and movie['belongs_to_collection'] is not None
 
 def reflectSeries(es, index='tmdb', doc_type='movie'):
     """ Series provide the best reflections, so we'll limit our scope
         to those. After all this is training data!"""
     reflections = {}
-    for hit in islice(scan(es, index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),5000):
+    for hit in islice(scan(es, scroll='30m', index=index, doc_type=doc_type, query={"query": {"match_all": {}}}),NUM_MOVIES_TO_SCAN):
         movie = hit['_source']
         docId = hit['_id']
         # Movies part of a series generate the best training data
@@ -38,6 +48,7 @@ def invertReflections(reflections):
     return qcsByKeyword
 
 def insertNegativeJudgments(reflections):
+    from random import random
     allNp = set()
     for title, ref in reflections.items():
         for phrase, qc in ref.queryCandidates.items():
@@ -46,7 +57,8 @@ def insertNegativeJudgments(reflections):
     # Apply each qc to every other qc, add as a negative judgment if not mentioned
     for title, ref in reflections.items():
         for np in allNp:
-            ref.addNegativeJudgment(np)
+            if random() < INCLUDE_NEGATIVE:
+                ref.addNegativeJudgment(np)
 
 
 def qcToJudg(qc, qid):
@@ -56,7 +68,8 @@ def qcToJudg(qc, qid):
                     qid=qid,
                     keywords=qc.qp,
                     docId=qc.docId,
-                    weight=weight
+                    weight=weight,
+                    title=qc.docTitle
                     )
 
 

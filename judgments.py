@@ -3,10 +3,11 @@ import re
 class Judgment:
     """ A judgment, ready to be serialized to
         libsvm format"""
-    def __init__(self, grade, qid, keywords, docId, weight=1):
+    def __init__(self, grade, qid, keywords, docId, title=None, weight=1):
         self.grade = grade
         self.qid = qid
         self.keywords = keywords
+        self.title = title
         self.docId = docId
         self.features = [] # 0th feature is ranklib feature 1
         self.weight = weight
@@ -15,11 +16,15 @@ class Judgment:
         return self.qid == other.qid and self.docId == other.docId
 
     def __str__(self):
-        return "grade:%s qid:%s (%s) docid:%s" % (self.grade, self.qid, self.keywords, self.docId)
+        return "grade:%s qid:%s(%s) docid:%s" % (self.grade, self.qid, self.keywords, self.docId)
 
     def toLibSvm(self):
         featuresAsStrs = ["%s:%s" % (idx+1, feature) for idx, feature in enumerate(self.features)]
-        comment = "# %s\t%s" % (self.docId, self.keywords)
+        comment = ""
+        if self.title:
+            comment = "# %s (%s)\t%s" % (self.docId, self.title, self.keywords)
+        else:
+            comment = "# %s\t%s" % (self.docId, self.keywords)
         return "%s\tqid:%s\t%s %s" % (self.grade, self.qid, "\t".join(featuresAsStrs), comment)
 
 
